@@ -1,0 +1,133 @@
+`timescale 1ns/1ps
+
+module tb_uart_tx;
+
+    // Clock
+    localparam CLK_PERIOD = 10;
+
+    logic clk;
+    logic rst_n;
+
+    // Baud tick
+    logic baud_tick;
+
+    // FIFO interface (TB-driven)
+    logic [7:0] tx_fifo_dout;
+    logic       tx_fifo_empty;
+    logic       tx_fifo_rd;
+
+    // Config
+    logic cfg_parity_en;
+    logic cfg_parity_odd;
+    logic cfg_stop_2bit;
+
+    // Outputs
+    logic tx_pin;
+    logic tx_busy;
+    logic tx_error_underrun;
+
+    // DUT
+    uart_tx dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .baud_tick(baud_tick),
+        .tx_fifo_dout(tx_fifo_dout),
+        .tx_fifo_empty(tx_fifo_empty),
+        .tx_fifo_rd(tx_fifo_rd),
+        .cfg_parity_en(cfg_parity_en),
+        .cfg_parity_odd(cfg_parity_odd),
+        .cfg_stop_2bit(cfg_stop_2bit),
+        .tx_pin(tx_pin),
+        .tx_busy(tx_busy),
+        .tx_error_underrun(tx_error_underrun)
+    );
+
+    // Clock generation
+    always #(CLK_PERIOD/2) clk = ~clk;
+
+    // Generate baud_tick every 16 clocks
+    integer baud_cnt;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            baud_cnt  <= 0;
+            baud_tick <= 0;
+        end else begin
+            if (baud_cnt == 15) begin
+                baud_cnt  <= 0;
+                baud_tick <= 1'b1;
+            end else begin
+                baud_cnt  <= baud_cnt + 1;
+                baud_tick <= 1'b0;
+            end
+        end
+    end
+
+    // Dump
+    initial begin
+        $dumpfile("uart_tx.vcd");
+        $dumpvars(0, tb_uart_tx);
+    end
+
+    // Test sequence
+    initial begin
+        clk = 0;
+        rst_n = 0;
+
+        cfg_parity_en  = 1;
+        cfg_parity_odd = 0; // even parity
+        cfg_stop_2bit  = 0;
+
+        tx_fifo_dout  = 8'hA5; // 1010_0101
+        tx_fifo_empty = 1;
+
+        // Reset
+        repeat (5) @(posedge clk);
+        rst_n = 1;
+
+        // Present data
+        @(posedge clk);
+        tx_fifo_empty = 0;
+
+        // Wait for FIFO read
+        wait (tx_fifo_rd);
+        tx_fifo_empty = 1; // FIFO empty after read
+
+        // Verify frame bit-by-bit
+        check_bit(1'b0, "START"); // start bit
+
+        check_bit(1'b1, "D0");
+        check_bit(1'b0, "D1");
+        check_bit(1'b1, "D2");
+        check_bit(1'b0, "D3");
+        check_bit(1'b0, "D4");
+        check_bit(1'b1, "D5");
+        check_bit(1'b0, "D6");
+        check_bit(1'b1, "D7");
+
+        // Even parity for 0xA5 = 0
+        check_bit(1'b0, "PARITY");
+
+        // Stop bit
+        check_bit(1'b1, "STOP");
+
+        $display("=================================");
+        $display("PASS: UART TX verified successfully");
+        $display("=================================");
+        $finish;
+    end
+
+    // Task to check bit at baud boundary
+    task check_bit(input logic expected, input string name);
+        begin
+            @(posedge baud_tick);
+            if (tx_pin !== expected) begin
+                $error("FAIL: %s bit mismatch. Expected %b, got %b",
+                       name, expected, tx_pin);
+                $fatal;
+            end else begin
+                $display("OK: %s bit = %b", name, tx_pin);
+            end
+        end
+    endtask
+
+endmodule
