@@ -1,0 +1,157 @@
+`timescale 1ns/1ps
+
+module uart_rx (
+    input        clk,
+    input        rst_n,
+    input        baud_tick_16x,
+    input        rx_pin,
+
+    input        cfg_parity_en,
+    input        cfg_parity_odd,
+    input        cfg_stop_2bit,
+
+    output reg        rx_fifo_wr,
+    output reg [7:0]  rx_fifo_din,
+    output reg        rx_ready,
+    output reg        rx_error_parity,
+    output reg        rx_error_framing
+);
+
+    // FSM states
+    localparam RX_IDLE   = 3'd0;
+    localparam RX_START  = 3'd1;
+    localparam RX_DATA   = 3'd2;
+    localparam RX_PARITY = 3'd3;
+    localparam RX_STOP   = 3'd4;
+
+    reg [2:0] state, next_state;
+
+    // Synchronizer
+    reg rx_sync1, rx_sync2;
+
+    // Counters and data
+    reg [3:0] sample_cnt;
+    reg [2:0] bit_cnt;
+    reg [7:0] shift_reg;
+    reg       parity_calc;
+
+    // RX pin synchronizer
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rx_sync1 <= 1'b1;
+            rx_sync2 <= 1'b1;
+        end else begin
+            rx_sync1 <= rx_pin;
+            rx_sync2 <= rx_sync1;
+        end
+    end
+
+    // FSM state register
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            state <= RX_IDLE;
+        else if (baud_tick_16x)
+            state <= next_state;
+    end
+
+    // FSM next-state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            RX_IDLE:
+                if (rx_sync2 == 1'b0)
+                    next_state = RX_START;
+
+            RX_START:
+                if (sample_cnt == 4'd15)
+                    next_state = RX_DATA;
+
+            RX_DATA:
+                if (sample_cnt == 4'd15 && bit_cnt == 3'd7)
+                    next_state = cfg_parity_en ? RX_PARITY : RX_STOP;
+
+            RX_PARITY:
+                if (sample_cnt == 4'd15)
+                    next_state = RX_STOP;
+
+            RX_STOP:
+                if (sample_cnt == 4'd15)
+                    next_state = RX_IDLE;
+        endcase
+    end
+
+    // Datapath
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sample_cnt        <= 4'd0;
+            bit_cnt           <= 3'd0;
+            shift_reg         <= 8'd0;
+            parity_calc       <= 1'b0;
+            rx_fifo_wr        <= 1'b0;
+            rx_ready          <= 1'b0;
+            rx_error_parity   <= 1'b0;
+            rx_error_framing  <= 1'b0;
+        end else begin
+            rx_fifo_wr <= 1'b0;
+            rx_ready   <= 1'b0;
+
+            if (baud_tick_16x) begin
+                sample_cnt <= sample_cnt + 1'b1;
+
+                case (state)
+
+                    RX_IDLE: begin
+                        sample_cnt        <= 4'd0;
+                        bit_cnt           <= 3'd0;
+                        parity_calc       <= 1'b0;
+                        rx_error_parity   <= 1'b0;
+                        rx_error_framing  <= 1'b0;
+                    end
+
+                    RX_START:
+                        if (sample_cnt == 4'd7 && rx_sync2 != 1'b0)
+                            rx_error_framing <= 1'b1;
+
+                    RX_DATA: begin
+                        if (sample_cnt == 4'd7) begin
+                            shift_reg   <= {rx_sync2, shift_reg[7:1]};
+                            parity_calc <= parity_calc ^ rx_sync2;
+                        end
+                        if (sample_cnt == 4'd15) begin
+                            sample_cnt <= 4'd0;
+                            bit_cnt    <= bit_cnt + 1'b1;
+                        end
+                    end
+
+                    RX_PARITY: begin
+                        if (sample_cnt == 4'd7) begin
+                            if (cfg_parity_odd) begin
+                                if (rx_sync2 == parity_calc)
+                                    rx_error_parity <= 1'b1;
+                            end else begin
+                                if (rx_sync2 != parity_calc)
+                                    rx_error_parity <= 1'b1;
+                            end
+                        end
+                        if (sample_cnt == 4'd15)
+                            sample_cnt <= 4'd0;
+                    end
+
+                    RX_STOP: begin
+                        if (sample_cnt == 4'd7 && rx_sync2 != 1'b1)
+                            rx_error_framing <= 1'b1;
+
+                        if (sample_cnt == 4'd15) begin
+                            rx_fifo_din <= shift_reg;
+                            rx_fifo_wr  <= 1'b1;
+                            rx_ready    <= 1'b1;
+                            sample_cnt  <= 4'd0;
+                        end
+                    end
+
+                endcase
+            end
+        end
+    end
+
+endmodule
