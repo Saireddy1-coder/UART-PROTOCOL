@@ -1,0 +1,148 @@
+`timescale 1ns/1ps
+
+module tb_fifo;
+
+    // Parameters (match DUT)
+    localparam DATA_WIDTH = 8;
+    localparam DEPTH      = 16;
+
+    // Clock
+    localparam CLK_PERIOD = 10;
+
+    logic clk;
+    logic rst_n;
+
+    // FIFO signals
+    logic                  wr_en;
+    logic                  rd_en;
+    logic [DATA_WIDTH-1:0] wdata;
+    logic [DATA_WIDTH-1:0] rdata;
+    logic                  full;
+    logic                  empty;
+    logic                  almost_full;
+    logic [$clog2(DEPTH):0] count;
+
+    // Instantiate DUT
+    fifo #(
+        .DATA_WIDTH(DATA_WIDTH),
+        .DEPTH(DEPTH)
+    ) dut (
+        .clk(clk),
+        .rst_n(rst_n),
+        .wr_en(wr_en),
+        .rd_en(rd_en),
+        .wdata(wdata),
+        .rdata(rdata),
+        .full(full),
+        .empty(empty),
+        .almost_full(almost_full),
+        .count(count)
+    );
+
+    // Clock generation
+    always #(CLK_PERIOD/2) clk = ~clk;
+
+    // Dump for EDA Playground
+    initial begin
+        $dumpfile("fifo.vcd");
+        $dumpvars(0, tb_fifo);
+    end
+
+    // Main stimulus
+    integer i;
+    initial begin
+        // Init
+        clk   = 0;
+        rst_n = 0;
+        wr_en = 0;
+        rd_en = 0;
+        wdata = 0;
+
+        // Reset
+        repeat (5) @(posedge clk);
+        rst_n = 1;
+
+        // ----------------------------
+        // TEST 1: FIFO empty after reset
+        // ----------------------------
+        @(posedge clk);
+        if (!empty || count != 0) begin
+            $error("FAIL: FIFO not empty after reset");
+            $fatal;
+        end
+
+        // ----------------------------
+        // TEST 2: Fill FIFO
+        // ----------------------------
+        for (i = 0; i < DEPTH; i++) begin
+            @(posedge clk);
+            wr_en = 1;
+            wdata = i;
+        end
+        @(posedge clk);
+        wr_en = 0;
+
+        if (!full || count != DEPTH) begin
+            $error("FAIL: FIFO not full after writes");
+            $fatal;
+        end
+
+        // ----------------------------
+        // TEST 3: Overflow protection
+        // ----------------------------
+        @(posedge clk);
+        wr_en = 1;
+        wdata = 8'hFF;
+        @(posedge clk);
+        wr_en = 0;
+
+        if (count != DEPTH) begin
+            $error("FAIL: FIFO overflow corrupted count");
+            $fatal;
+        end
+
+        // ----------------------------
+        // TEST 4: Read back data
+        // ----------------------------
+        for (i = 0; i < DEPTH; i++) begin
+            @(posedge clk);
+            rd_en = 1;
+            @(posedge clk);
+            if (rdata !== i[DATA_WIDTH-1:0]) begin
+                $error("FAIL: Data mismatch. Expected %0d, got %0d", i, rdata);
+                $fatal;
+            end
+        end
+        rd_en = 0;
+
+        if (!empty || count != 0) begin
+            $error("FAIL: FIFO not empty after reads");
+            $fatal;
+        end
+
+        // ----------------------------
+        // TEST 5: Simultaneous read/write
+        // ----------------------------
+        @(posedge clk);
+        wr_en = 1;
+        rd_en = 1;
+        wdata = 8'hAA;
+        @(posedge clk);
+        wr_en = 0;
+        rd_en = 0;
+
+        if (count != 0) begin
+            $error("FAIL: Count changed during simultaneous read/write");
+            $fatal;
+        end
+
+        // ----------------------------
+        // DONE
+        // ----------------------------
+        $display("=================================");
+        $display("PASS: FIFO verification complete");
+        $display("=================================");
+        $finish;
+    end
+
+endmodule
