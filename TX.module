@@ -1,0 +1,128 @@
+`timescale 1ns/1ps
+
+module uart_tx (
+    input  logic        clk,
+    input  logic        rst_n,
+
+    // Timing
+    input  logic        baud_tick,
+
+    // FIFO interface
+    input  logic [7:0]  tx_fifo_dout,
+    input  logic        tx_fifo_empty,
+    output logic        tx_fifo_rd,
+
+    // Configuration
+    input  logic        cfg_parity_en,
+    input  logic        cfg_parity_odd,   // 1 = odd, 0 = even
+    input  logic        cfg_stop_2bit,    // 1 = 2 stop bits
+
+    // Outputs
+    output logic        tx_pin,
+    output logic        tx_busy,
+    output logic        tx_error_underrun
+);
+
+    // FSM states
+    typedef enum logic [2:0] {
+        IDLE,
+        START,
+        DATA,
+        PARITY,
+        STOP
+    } tx_state_t;
+
+    tx_state_t state, next_state;
+
+    logic [7:0] shift_reg;
+    logic [2:0] bit_cnt;
+    logic       parity_bit;
+    logic       stop_cnt;
+
+    // Parity calculation
+    function logic calc_parity(input logic [7:0] data);
+        if (cfg_parity_odd)
+            calc_parity = ~^data; // odd parity
+        else
+            calc_parity =  ^data; // even parity
+    endfunction
+
+    // FSM state register
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            state <= IDLE;
+        else if (baud_tick)
+            state <= next_state;
+    end
+
+    // FSM next-state logic
+    always_comb begin
+        next_state = state;
+        case (state)
+            IDLE:   if (!tx_fifo_empty) next_state = START;
+            START:  next_state = DATA;
+            DATA:   if (bit_cnt == 3'd7)
+                        next_state = cfg_parity_en ? PARITY : STOP;
+            PARITY: next_state = STOP;
+            STOP:   if (cfg_stop_2bit && !stop_cnt)
+                        next_state = STOP;
+                    else
+                        next_state = IDLE;
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // Datapath + outputs
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            shift_reg         <= '0;
+            bit_cnt           <= '0;
+            parity_bit        <= 1'b0;
+            stop_cnt          <= 1'b0;
+            tx_pin            <= 1'b1;
+            tx_fifo_rd        <= 1'b0;
+            tx_busy           <= 1'b0;
+            tx_error_underrun <= 1'b0;
+        end else begin
+            tx_fifo_rd <= 1'b0;
+
+            if (baud_tick) begin
+                case (state)
+                    IDLE: begin
+                        tx_pin  <= 1'b1;
+                        tx_busy <= 1'b0;
+
+                        if (!tx_fifo_empty) begin
+                            tx_fifo_rd <= 1'b1;
+                            shift_reg  <= tx_fifo_dout;
+                            parity_bit <= calc_parity(tx_fifo_dout);
+                            bit_cnt    <= 3'd0;
+                            stop_cnt   <= 1'b0;
+                            tx_busy    <= 1'b1;
+                        end
+                    end
+
+                    START: begin
+                        tx_pin <= 1'b0;
+                    end
+
+                    DATA: begin
+                        tx_pin    <= shift_reg[0];
+                        shift_reg <= shift_reg >> 1;
+                        bit_cnt   <= bit_cnt + 1'b1;
+                    end
+
+                    PARITY: begin
+                        tx_pin <= parity_bit;
+                    end
+
+                    STOP: begin
+                        tx_pin <= 1'b1;
+                        stop_cnt <= 1'b1;
+                    end
+                endcase
+            end
+        end
+    end
+
+endmodule
