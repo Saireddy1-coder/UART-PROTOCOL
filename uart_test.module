@@ -1,0 +1,185 @@
+`timescale 1ns/1ps
+
+// ============================================================
+// BAUD GENERATOR
+// ============================================================
+module baud_gen (
+    input        clk,
+    input        rst_n,
+    input  [15:0] baud_div,
+    output reg   baud_tick,
+    output reg   baud_tick_16x
+);
+    reg [15:0] cnt;
+    reg [15:0] cnt16; // Fixed size to match baud_div
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cnt <= 0; cnt16 <= 0;
+            baud_tick <= 0; baud_tick_16x <= 0;
+        end else begin
+            baud_tick <= 0; baud_tick_16x <= 0;
+            
+            // 16x Tick Generation
+            if (cnt16 >= (baud_div / 16)) begin
+                cnt16 <= 0;
+                baud_tick_16x <= 1;
+            end else cnt16 <= cnt16 + 1;
+
+            // 1x Tick Generation
+            if (cnt >= baud_div) begin
+                cnt <= 0;
+                baud_tick <= 1;
+            end else cnt <= cnt + 1;
+        end
+    end
+endmodule
+
+// ============================================================
+// SIMPLE FIFO
+// ============================================================
+module fifo (
+    input        clk, rst_n, wr_en, rd_en,
+    input  [7:0] wdata,
+    output reg [7:0] rdata,
+    output       full, empty
+);
+    reg [7:0] mem [0:15];
+    reg [3:0] wptr, rptr;
+    reg [4:0] count;
+
+    assign full  = (count == 16);
+    assign empty = (count == 0);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wptr <= 0; rptr <= 0; count <= 0;
+        end else begin
+            if (wr_en && !full) begin
+                mem[wptr] <= wdata;
+                wptr <= wptr + 1;
+                count <= count + 1;
+            end
+            if (rd_en && !empty) begin
+                rdata <= mem[rptr];
+                rptr <= rptr + 1;
+                count <= count - 1;
+            end
+        end
+    end
+endmodule
+
+// ============================================================
+// UART TX
+// ============================================================
+module uart_tx (
+    input        clk, rst_n, baud_tick,
+    input  [7:0] data_in,
+    input        data_valid,
+    output reg   data_rd,
+    output reg   tx_pin
+);
+    reg [9:0] shift;
+    reg [3:0] bit_cnt;
+    reg busy;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            tx_pin <= 1; busy <= 0; bit_cnt <= 0; data_rd <= 0;
+        end else begin
+            data_rd <= 0;
+            if (baud_tick) begin
+                if (!busy && data_valid) begin
+                    shift <= {1'b1, data_in, 1'b0};
+                    busy <= 1;
+                    bit_cnt <= 0;
+                    data_rd <= 1;
+                end else if (busy) begin
+                    tx_pin <= shift[0];
+                    shift <= {1'b1, shift[9:1]};
+                    if (bit_cnt == 9) busy <= 0;
+                    else bit_cnt <= bit_cnt + 1;
+                end
+            end
+        end
+    end
+endmodule
+
+// ============================================================
+// UART RX (Improved with 16x Sampling)
+// ============================================================
+module uart_rx (
+    input        clk, rst_n, baud_tick_16x,
+    input        rx_pin,
+    output reg [7:0] data_out,
+    output reg       data_wr
+);
+    reg [3:0] tick_cnt;
+    reg [3:0] bit_cnt;
+    reg [7:0] shift;
+    reg       busy;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            busy <= 0; data_wr <= 0; tick_cnt <= 0; bit_cnt <= 0;
+        end else begin
+            data_wr <= 1'b0;
+            if (baud_tick_16x) begin
+                if (!busy) begin
+                    if (rx_pin == 0) begin // Start bit detected
+                        busy <= 1;
+                        tick_cnt <= 0;
+                        bit_cnt <= 0;
+                    end
+                end else begin
+                    if (tick_cnt == 7) begin // Sample at the middle (tick 8)
+                        if (bit_cnt < 8) begin
+                            shift <= {rx_pin, shift[7:1]};
+                            bit_cnt <= bit_cnt + 1;
+                        end else begin
+                            data_out <= shift;
+                            data_wr <= 1;
+                            busy <= 0;
+                        end
+                        tick_cnt <= tick_cnt + 1;
+                    end else if (tick_cnt == 15) begin
+                        tick_cnt <= 0;
+                    end else tick_cnt <= tick_cnt + 1;
+                end
+            end
+        end
+    end
+endmodule
+
+// ============================================================
+// UART TOP
+// ============================================================
+module uart_top (
+    input        clk, rst_n,
+    input  [5:0] addr,
+    input        wr_en, rd_en,
+    input  [7:0] wdata,
+    output [7:0] rdata,
+    input        rx_pin,
+    output       tx_pin,
+    output       irq
+);
+    wire baud_tick, baud_tick_16x;
+    wire [7:0] tx_data, rx_data;
+    wire tx_empty, rx_empty, tx_rd, rx_wr;
+
+    assign irq = ~rx_empty;
+
+    baud_gen u_baud (
+        .clk(clk), .rst_n(rst_n),
+        .baud_div(16'd160), // Adjusted for simulation visibility
+        .baud_tick(baud_tick),
+        .baud_tick_16x(baud_tick_16x)
+    );
+
+    fifo tx_fifo (.clk(clk), .rst_n(rst_n), .wr_en(wr_en && addr==0), .rd_en(tx_rd), .wdata(wdata), .rdata(tx_data), .full(), .empty(tx_empty));
+    fifo rx_fifo (.clk(clk), .rst_n(rst_n), .wr_en(rx_wr), .rd_en(rd_en && addr==0), .wdata(rx_data), .rdata(rdata), .full(), .empty(rx_empty));
+    uart_tx u_tx (.clk(clk), .rst_n(rst_n), .baud_tick(baud_tick), .data_in(tx_data), .data_valid(~tx_empty), .data_rd(tx_rd), .tx_pin(tx_pin));
+    uart_rx u_rx (.clk(clk), .rst_n(rst_n), .baud_tick_16x(baud_tick_16x), .rx_pin(rx_pin), .data_out(rx_data), .data_wr(rx_wr));
+
+endmodule
